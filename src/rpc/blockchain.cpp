@@ -6,6 +6,7 @@
 #include "rpc/blockchain.h"
 
 #include "amount.h"
+#include "base58.h"
 #include "chain.h"
 #include "chainparams.h"
 #include "checkpoints.h"
@@ -895,6 +896,154 @@ UniValue pruneblockchain(const JSONRPCRequest& request)
     return uint64_t(height);
 }
 
+UniValue ico_accountsStatement(const JSONRPCRequest &request)
+{
+    if (request.fHelp || request.params.size() > 3 || request.params.size() < 1)
+        throw std::runtime_error(
+                "ico_accountsStatement ( [\"addresses\",...] [startblock] [endblock] )\n"
+                        "\nReturns array of unspent transaction outputs\n"
+                        "with between startblock and endblock (exclusive).\n"
+                        "\nArguments:\n"
+                        "1. \"addresses\"      (string) A json array of bitcoin addresses to filter\n"
+                        "    [\n"
+                        "      \"address\"     (string) bitcoin address\n"
+                        "      ,...\n"
+                        "    ]\n"
+                        "2. startblock         (numeric, optional, default=0) Start block /inclusive/\n"
+                        "3. endblock           (numeric, optional, default=startblock + 1) End block /exclusive/\n"
+        );
+
+
+
+    std::set<CBitcoinAddress> setAddress;
+    if (request.params.size() > 0 && !request.params[0].isNull()) {
+        RPCTypeCheckArgument(request.params[0], UniValue::VARR);
+        UniValue inputs = request.params[0].get_array();
+        for (unsigned int idx = 0; idx < inputs.size(); idx++)
+        {
+            const UniValue& input = inputs[idx];
+            CBitcoinAddress address(input.get_str());
+            if (!address.IsValid())
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Bitcoin address: ")+input.get_str());
+            if (setAddress.count(address))
+                throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("Invalid parameter, duplicated address: ")+input.get_str());
+            setAddress.insert(address);
+        }
+    }
+
+    int chainheight = chainActive.Height();
+
+    int start_block = 0;
+    if (request.params.size() > 1 && !request.params[1].isNull()) {
+        RPCTypeCheckArgument(request.params[1], UniValue::VNUM);
+        start_block = request.params[1].get_int();
+    }
+    if (start_block < 0)
+        start_block = 0;
+
+    int end_block = start_block + 1;
+    if (request.params.size() > 2 && !request.params[2].isNull()) {
+        RPCTypeCheckArgument(request.params[2], UniValue::VNUM);
+        end_block = request.params[2].get_int();
+    }
+    if (end_block > chainheight)
+        end_block = chainheight;
+
+    UniValue blockrange(UniValue::VARR);
+    blockrange.push_back(start_block);
+    blockrange.push_back(end_block);
+
+    UniValue statements(UniValue::VOBJ);
+
+    if (setAddress.empty())
+        return statements;
+
+    using ico_tx_detail_t = std::tuple<
+            int /* block number */,
+            int64_t /*tx time */,
+            std::string /*tx id */,
+            int /*tx output index (from) */,
+            double /* value */
+    >;
+
+    using ico_tx_details_t = std::list<ico_tx_detail_t>;
+    using ico_tx_db_t = std::unordered_map<std::string, ico_tx_details_t>;
+
+    ico_tx_db_t ico_tx_db;
+    int block_number;
+    int64_t block_time;
+
+    std::cout<<"FlushStateToDisk...\n";
+    FlushStateToDisk();
+
+    std::cout<<"["<<start_block<<", "<<end_block<<")";
+    for (block_number = start_block; block_number<end_block; ++block_number)
+    {
+        {
+        LOCK(cs_main);
+        block_time = chainActive[block_number]->GetBlockTime();
+        auto pblockindex = chainActive[block_number];
+        CBlock block;
+
+        if (ReadBlockFromDisk(block, pblockindex, Params().GetConsensus())) {
+            for (const auto &tx : block.vtx) {
+                for (unsigned i = 0; i < tx->vout.size(); ++i) {
+                    Coin coin;
+                    COutPoint key(tx->GetHash(), i);
+                    if (pcoinsdbview->GetCoin(key, coin)) {
+                        CTxDestination address;
+                        bool fValidAddress = ExtractDestination(
+                                coin.out.scriptPubKey,
+                                address
+                        );
+
+                        if (!fValidAddress || !setAddress.count(address))
+                            continue;
+
+                        ico_tx_db[CBitcoinAddress(address).ToString()].emplace_back(
+                                block_number,
+                                block_time,
+                                key.hash.GetHex(),
+                                key.n,
+                                coin.out.nValue / static_cast<double>(COIN)
+                        );
+                    }
+                }
+            }
+            }
+            boost::this_thread::interruption_point();
+        }
+    }
+    std::cout<<"/done\n";
+
+    for (auto const &kv : ico_tx_db)
+    {
+        UniValue statement(UniValue::VOBJ);
+        UniValue records(UniValue::VARR);
+        double balance = 0;
+
+        for(auto const &li : kv.second)
+        {
+            UniValue record(UniValue::VOBJ);
+            record.push_back(Pair("block", std::get<0>(li)));
+            record.push_back(Pair("timestamp", std::get<1>(li)));
+            record.push_back(Pair("tx_hash", std::get<2>(li)));
+            record.push_back(Pair("from", std::get<3>(li)));
+            record.push_back(Pair("value", std::get<4>(li)));
+            records.push_back(record);
+
+            balance += std::get<4>(li);
+        }
+
+        statement.push_back(Pair("balance", balance));
+        statement.push_back(Pair("transactions_in", records));
+
+        statements.push_back(Pair(kv.first, statement));
+    }
+    statements.push_back(Pair("blockrange", blockrange));
+    return statements;
+}
+
 UniValue gettxoutsetinfo(const JSONRPCRequest& request)
 {
     if (request.fHelp || request.params.size() != 0)
@@ -1551,6 +1700,7 @@ static const CRPCCommand commands[] =
     { "blockchain",         "gettxout",               &gettxout,               true,  {"txid","n","include_mempool"} },
     { "blockchain",         "gettxoutsetinfo",        &gettxoutsetinfo,        true,  {} },
     { "blockchain",         "pruneblockchain",        &pruneblockchain,        true,  {"height"} },
+    { "blockchain",         "ico_accountsStatement",  &ico_accountsStatement,  true,  {"addresses","startblock","endblock"}, },
     { "blockchain",         "verifychain",            &verifychain,            true,  {"checklevel","nblocks"} },
 
     { "blockchain",         "preciousblock",          &preciousblock,          true,  {"blockhash"} },
