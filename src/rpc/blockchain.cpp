@@ -1041,6 +1041,12 @@ UniValue ico_accountsStatement(const JSONRPCRequest &request)
         statements.push_back(Pair(kv.first, statement));
     }
     statements.push_back(Pair("blockrange", blockrange));
+    if (end_block - start_block > 0)
+    {
+        statements.push_back(Pair("last_block_time", chainActive[end_block - 1]->GetBlockTime()));
+        statements.push_back(Pair("last_block_hash", chainActive[end_block - 1]->phashBlock->GetHex()));
+    }
+
     return statements;
 }
 
