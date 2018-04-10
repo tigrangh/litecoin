@@ -946,8 +946,8 @@ UniValue ico_accountsStatement(const JSONRPCRequest &request)
         RPCTypeCheckArgument(request.params[2], UniValue::VNUM);
         end_block = request.params[2].get_int();
     }
-    if (end_block > chainheight)
-        end_block = chainheight;
+    if (end_block > chainheight - 4)
+        end_block = start_block;
 
     UniValue blockrange(UniValue::VARR);
     blockrange.push_back(start_block);
